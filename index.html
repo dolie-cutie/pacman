@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pac-Man</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    color: #fff;
+    font-family: 'Courier New', monospace;
+    height: 100%;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    gap: 12px;
+  }
+  #hud {
+    display: flex;
+    gap: 40px;
+    font-size: 20px;
+    letter-spacing: 2px;
+    color: #ffcc00;
+  }
+  canvas {
+    background: #000;
+    box-shadow: 0 0 24px rgba(33, 33, 255, 0.4);
+    border-radius: 4px;
+  }
+  #msg {
+    height: 24px;
+    font-size: 18px;
+    color: #fff;
+    letter-spacing: 1px;
+  }
+  .hint {
+    font-size: 13px;
+    color: #888;
+    letter-spacing: 1px;
+  }
+  #pad {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  .padrow { display: flex; gap: 5px; }
+  .padbtn {
+    width: 56px;
+    height: 44px;
+    background: #15152a;
+    color: #ffcc00;
+    border: 1px solid #3a3aff;
+    border-radius: 8px;
+    font-size: 18px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .padbtn:active { background: #2e2e5e; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div>SCORE <span id="score">0</span></div>
+    <div>HIGH <span id="high">0</span></div>
+    <div>LIVES <span id="lives">3</span></div>
+  </div>
+  <canvas id="game"></canvas>
+  <div id="msg">Press an arrow key or tap a button to start</div>
+  <div id="pad" aria-label="touch controls">
+    <button class="padbtn" data-dir="up">▲</button>
+    <div class="padrow">
+      <button class="padbtn" data-dir="left">◀</button>
+      <button class="padbtn" data-dir="down">▼</button>
+      <button class="padbtn" data-dir="right">▶</button>
+    </div>
+  </div>
+  <div class="hint">Arrow keys / WASD or buttons to move &nbsp;•&nbsp; P to pause &nbsp;•&nbsp; M to mute &nbsp;•&nbsp; Eat power pellets to chase ghosts</div>
+</div>
+<script>
+(() => {
+  "use strict";
+
+  // ----- Maze layout -----
+  // # = wall, . = pellet, o = power pellet, ' ' = empty, - = ghost door
+  // P = pacman start, 1-4 = ghost starts
+  const RAW = [
+    "############################",
+    "#............##............#",
+    "#.####.#####.##.#####.####.#",
+    "#o####.#####.##.#####.####o#",
+    "#.####.#####.##.#####.####.#",
+    "#..........................#",
+    "#.####.##.########.##.####.#",
+    "#.####.##.########.##.####.#",
+    "#......##....##....##......#",
+    "######.##### ## #####.######",
+    "######.##### ## #####.######",
+    "######.##          ##.######",
+    "######.## ###--### ##.######",
+    "######.## #      # ##.######",
+    "      .   #1 2 3 # .        ",
+    "######.## #  4   # ##.######",
+    "######.## ######## ##.######",
+    "######.##          ##.######",
+    "######.## ######## ##.######",
+    "######.## ######## ##.######",
+    "#............##............#",
+    "#.####.#####.##.#####.####.#",
+    "#.####.#####.##.#####.####.#",
+    "#o..##.......P .......##..o#",
+    "###.##.##.########.##.##.###",
+    "###.##.##.########.##.##.###",
+    "#......##....##....##......#",
+    "#.##########.##.##########.#",
+    "#.##########.##.##########.#",
+    "#..........................#",
+    "############################",
+  ];
+
+  const ROWS = RAW.length;
+  const COLS = RAW[0].length;
+  const TILE = 20;
+  const W = COLS * TILE;
+  const H = ROWS * TILE;
+
+  const canvas = document.getElementById("game");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+
+  // Build grid + collect entity start positions
+  const grid = [];          // 2D array of chars (walls/pellets)
+  let pacStart = null;
+  const ghostStarts = [];
+  let doorTiles = [];
+
+  for (let r = 0; r < ROWS; r++) {
+    const row = [];
+    for (let c = 0; c < COLS; c++) {
+      let ch = RAW[r][c] || " ";
+      if (ch === "P") { pacStart = { c, r }; ch = " "; }
+      else if (ch >= "1" && ch <= "4") { ghostStarts[+ch - 1] = { c, r }; ch = " "; }
+      else if (ch === "-") { doorTiles.push({ c, r }); }
+      row.push(ch);
+    }
+    grid.push(row);
+  }
+
+  function isWall(c, r) {
+    if (r < 0 || r >= ROWS) return true;
+    // horizontal tunnel wrap
+    if (c < 0 || c >= COLS) return false;
+    const ch = grid[r][c];
+    return ch === "#" || ch === "-";
+  }
+  function isWallForGhost(c, r, canUseDoor) {
+    if (r < 0 || r >= ROWS) return true;
+    if (c < 0 || c >= COLS) return false;
+    const ch = grid[r][c];
+    if (ch === "-") return !canUseDoor;
+    return ch === "#";
+  }
+
+  let totalPellets = 0;
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (grid[r][c] === "." || grid[r][c] === "o") totalPellets++;
+
+  // ----- Game state -----
+  const DIRS = {
+    up:    { x: 0, y: -1 },
+    down:  { x: 0, y: 1 },
+    left:  { x: -1, y: 0 },
+    right: { x: 1, y: 0 },
+    none:  { x: 0, y: 0 },
+  };
+
+  let score = 0;
+  let high = +(localStorage.getItem("pacman_high") || 0);
+  let lives = 3;
+  let pelletsLeft = totalPellets;
+  let level = 1;
+  let running = false;
+  let paused = false;
+  let gameOver = false;
+  let frightTimer = 0;     // frames remaining of frightened mode
+  let ghostEatChain = 0;   // consecutive ghosts eaten during one power pellet
+
+  const FRIGHT_FRAMES = 7 * 60; // ~7 seconds at 60fps
+
+  document.getElementById("high").textContent = high;
+
+  // Pac-Man entity
+  const pac = {
+    c: pacStart.c, r: pacStart.r,
+    x: pacStart.c * TILE + TILE / 2,
+    y: pacStart.r * TILE + TILE / 2,
+    dir: "none",
+    next: "none",
+    speed: 2.2,
+    mouth: 0,
+    mouthDir: 1,
+  };
+
+  // Ghosts
+  const GHOST_COLORS = ["#ff0000", "#ffb8ff", "#00ffff", "#ffb852"];
+  const GHOST_NAMES = ["blinky", "pinky", "inky", "clyde"];
+  const ghosts = ghostStarts.map((s, i) => ({
+    name: GHOST_NAMES[i],
+    color: GHOST_COLORS[i],
+    home: { c: s.c, r: s.r },
+    c: s.c, r: s.r,
+    x: s.c * TILE + TILE / 2,
+    y: s.r * TILE + TILE / 2,
+    dir: "up",
+    speed: 1.9,
+    mode: "scatter",       // scatter | chase | frightened | eaten
+    inHouse: true,         // everyone exits via the door (blinky immediately)
+    releaseAt: i * 180,    // staggered release (frames)
+    elapsed: 0,
+    scatterTarget: [
+      { c: COLS - 2, r: 0 },
+      { c: 1, r: 0 },
+      { c: COLS - 2, r: ROWS - 1 },
+      { c: 1, r: ROWS - 1 },
+    ][i],
+  }));
+
+  // Scatter/chase wave schedule (classic-ish)
+  let modeTimer = 0;
+  let waveIndex = 0;
+  const WAVES = [
+    { mode: "scatter", time: 7 * 60 },
+    { mode: "chase",   time: 20 * 60 },
+    { mode: "scatter", time: 7 * 60 },
+    { mode: "chase",   time: 20 * 60 },
+    { mode: "scatter", time: 5 * 60 },
+    { mode: "chase",   time: 20 * 60 },
+    { mode: "scatter", time: 5 * 60 },
+    { mode: "chase",   time: Infinity },
+  ];
+
+  // ----- Sound (Web Audio, all synthesized) -----
+  const sfx = (() => {
+    let actx = null;
+    let muted = false;
+    let sirenOsc = null, sirenGain = null, sirenLfo = null, sirenLfoGain = null;
+    let sirenState = "off";
+    let wakaHigh = false;
+
+    function ensure() {
+      if (!actx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        actx = new AC();
+      }
+      if (actx.state === "suspended") actx.resume();
+    }
+
+    function tone(freq, dur, { type = "square", vol = 0.06, slideTo = null, delay = 0 } = {}) {
+      if (muted || !actx) return;
+      const t0 = actx.currentTime + delay;
+      const o = actx.createOscillator();
+      const g = actx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, t0);
+      if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+      g.gain.setValueAtTime(vol, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(actx.destination);
+      o.start(t0);
+      o.stop(t0 + dur + 0.05);
+    }
+
+    function setSiren(state) {
+      if (!actx) return;
+      if (muted) state = "off";
+      if (state === sirenState) return;
+      sirenState = state;
+      const t = actx.currentTime;
+      if (state === "off") {
+        if (sirenGain) sirenGain.gain.setTargetAtTime(0, t, 0.05);
+        return;
+      }
+      if (!sirenOsc) {
+        sirenOsc = actx.createOscillator();
+        sirenGain = actx.createGain();
+        sirenLfo = actx.createOscillator();
+        sirenLfoGain = actx.createGain();
+        sirenOsc.type = "triangle";
+        sirenLfo.connect(sirenLfoGain).connect(sirenOsc.frequency);
+        sirenOsc.connect(sirenGain).connect(actx.destination);
+        sirenGain.gain.value = 0;
+        sirenOsc.start();
+        sirenLfo.start();
+      }
+      sirenGain.gain.setTargetAtTime(0.018, t, 0.05);
+      if (state === "fright") {
+        sirenOsc.frequency.setValueAtTime(170, t);
+        sirenLfo.frequency.setValueAtTime(8, t);
+        sirenLfoGain.gain.setValueAtTime(70, t);
+      } else {
+        sirenOsc.frequency.setValueAtTime(300, t);
+        sirenLfo.frequency.setValueAtTime(2.2, t);
+        sirenLfoGain.gain.setValueAtTime(45, t);
+      }
+    }
+
+    return {
+      ensure,
+      setSiren,
+      toggleMute() {
+        muted = !muted;
+        if (muted && actx && sirenGain) {
+          sirenGain.gain.setTargetAtTime(0, actx.currentTime, 0.05);
+          sirenState = "off";
+        }
+        return muted;
+      },
+      waka() {
+        tone(wakaHigh ? 540 : 420, 0.09, { slideTo: wakaHigh ? 420 : 540, vol: 0.045 });
+        wakaHigh = !wakaHigh;
+      },
+      power() {
+        tone(120, 0.12, { type: "sawtooth", slideTo: 280, vol: 0.08 });
+        tone(120, 0.12, { type: "sawtooth", slideTo: 280, vol: 0.08, delay: 0.13 });
+      },
+      eatGhost() {
+        tone(200, 0.35, { type: "sawtooth", slideTo: 950, vol: 0.08 });
+      },
+      death() {
+        tone(620, 0.45, { type: "sawtooth", slideTo: 140, vol: 0.09 });
+        tone(220, 0.12, { type: "square", slideTo: 90, vol: 0.09, delay: 0.5 });
+        tone(220, 0.12, { type: "square", slideTo: 90, vol: 0.09, delay: 0.65 });
+      },
+      intro() {
+        const notes = [494, 988, 740, 622, 988, 740, 622, 523, 1047, 784, 659];
+        notes.forEach((f, i) => tone(f, 0.11, { type: "triangle", vol: 0.07, delay: i * 0.12 }));
+      },
+      levelUp() {
+        [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.14, { type: "triangle", vol: 0.08, delay: i * 0.13 }));
+      },
+    };
+  })();
+
+  // ----- Input -----
+  const keyMap = {
+    ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+    w: "up", s: "down", a: "left", d: "right",
+    W: "up", S: "down", A: "left", D: "right",
+  };
+  window.addEventListener("keydown", (e) => {
+    sfx.ensure();
+    if (e.key === "p" || e.key === "P") {
+      if (running && !gameOver) { paused = !paused; setMsg(paused ? "Paused" : ""); }
+      return;
+    }
+    if (e.key === "m" || e.key === "M") {
+      const muted = sfx.toggleMute();
+      setMsg(muted ? "Muted" : "Sound on");
+      return;
+    }
+    const d = keyMap[e.key];
+    if (d) {
+      e.preventDefault();
+      steer(d);
+    }
+  });
+
+  function steer(d) {
+    pac.next = d;
+    if (gameOver) { restart(); return; }
+    if (!running) startGame();
+  }
+
+  // On-screen pad (works without keyboard focus, and on touch devices)
+  document.querySelectorAll("#pad .padbtn").forEach((btn) => {
+    btn.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      sfx.ensure();
+      steer(btn.dataset.dir);
+    });
+  });
+
+  // Clicking the maze grabs keyboard focus and starts/resumes the game
+  canvas.addEventListener("pointerdown", () => {
+    sfx.ensure();
+    window.focus();
+    if (gameOver) restart();
+    else if (!running) startGame();
+  });
+
+  function setMsg(t) { document.getElementById("msg").textContent = t; }
+
+  let introNeeded = true;
+  function startGame() {
+    running = true;
+    paused = false;
+    setMsg("");
+    if (introNeeded) { sfx.intro(); introNeeded = false; }
+  }
+
+  // ----- Movement helpers -----
+  function atCenter(e, spd) {
+    // Within half a step of the tile center: triggers exactly once per tile
+    // (a full-step tolerance re-triggers on the frame after snapping, which
+    // teleports the entity back and freezes it in place).
+    const tol = (spd || e.speed) * 0.5 + 0.001;
+    const cx = e.c * TILE + TILE / 2;
+    const cy = e.r * TILE + TILE / 2;
+    return Math.abs(e.x - cx) <= tol && Math.abs(e.y - cy) <= tol;
+  }
+  function snapToCenter(e) {
+    e.x = e.c * TILE + TILE / 2;
+    e.y = e.r * TILE + TILE / 2;
+  }
+
+  function tileAhead(e, dir) {
+    return { c: e.c + DIRS[dir].x, r: e.r + DIRS[dir].y };
+  }
+
+  function wrapTunnel(e) {
+    if (e.x < -TILE / 2) { e.x = W + TILE / 2; e.c = COLS - 1; }
+    else if (e.x > W + TILE / 2) { e.x = -TILE / 2; e.c = 0; }
+  }
+
+  // ----- Pac-Man update -----
+  function updatePac() {
+    // Try to apply queued direction at tile centers
+    if (atCenter(pac)) {
+      snapToCenter(pac);
+      pac.c = Math.round((pac.x - TILE / 2) / TILE);
+      pac.r = Math.round((pac.y - TILE / 2) / TILE);
+
+      if (pac.next !== "none") {
+        const t = tileAhead(pac, pac.next);
+        if (!isWall(t.c, t.r)) pac.dir = pac.next;
+      }
+      // Stop if wall ahead
+      const t2 = tileAhead(pac, pac.dir);
+      if (isWall(t2.c, t2.r)) {
+        pac.dir = "none";
+      }
+    }
+
+    const d = DIRS[pac.dir];
+    pac.x += d.x * pac.speed;
+    pac.y += d.y * pac.speed;
+    wrapTunnel(pac);
+
+    // track current tile every frame (atCenter measures against these,
+    // so they must follow the pixel position, same as the ghosts do)
+    pac.c = Math.round((pac.x - TILE / 2) / TILE);
+    pac.r = Math.round((pac.y - TILE / 2) / TILE);
+
+    const cc = pac.c;
+    const rr = pac.r;
+    if (rr >= 0 && rr < ROWS && cc >= 0 && cc < COLS) {
+      const ch = grid[rr][cc];
+      if (ch === ".") {
+        grid[rr][cc] = " ";
+        score += 10; pelletsLeft--; bumpScore();
+        sfx.waka();
+      } else if (ch === "o") {
+        grid[rr][cc] = " ";
+        score += 50; pelletsLeft--; bumpScore();
+        sfx.power();
+        enterFrightened();
+      }
+    }
+
+    // mouth animation
+    if (pac.dir !== "none") {
+      pac.mouth += pac.mouthDir * 0.15;
+      if (pac.mouth > 0.32) { pac.mouth = 0.32; pac.mouthDir = -1; }
+      if (pac.mouth < 0) { pac.mouth = 0; pac.mouthDir = 1; }
+    }
+
+    if (pelletsLeft <= 0) nextLevel();
+  }
+
+  function bumpScore() {
+    document.getElementById("score").textContent = score;
+    if (score > high) {
+      high = score;
+      document.getElementById("high").textContent = high;
+      localStorage.setItem("pacman_high", high);
+    }
+  }
+
+  function enterFrightened() {
+    frightTimer = FRIGHT_FRAMES;
+    ghostEatChain = 0;
+    for (const g of ghosts) {
+      if (g.mode !== "eaten") {
+        g.mode = "frightened";
+        // reverse direction
+        g.dir = reverse(g.dir);
+      }
+    }
+  }
+
+  function reverse(dir) {
+    return { up: "down", down: "up", left: "right", right: "left", none: "none" }[dir];
+  }
+
+  // ----- Ghost AI -----
+  function ghostTarget(g) {
+    if (g.mode === "frightened") return null; // random
+    if (g.mode === "eaten") return { c: doorTiles[0]?.c ?? g.home.c, r: g.home.r };
+    if (g.mode === "scatter") return g.scatterTarget;
+
+    // chase targeting per personality
+    if (g.name === "blinky") {
+      return { c: pac.c, r: pac.r };
+    }
+    if (g.name === "pinky") {
+      return { c: pac.c + DIRS[pac.dir].x * 4, r: pac.r + DIRS[pac.dir].y * 4 };
+    }
+    if (g.name === "inky") {
+      const blinky = ghosts[0];
+      const ax = pac.c + DIRS[pac.dir].x * 2;
+      const ay = pac.r + DIRS[pac.dir].y * 2;
+      return { c: ax + (ax - blinky.c), r: ay + (ay - blinky.r) };
+    }
+    // clyde: chase if far, scatter if close
+    const dist = Math.hypot(pac.c - g.c, pac.r - g.r);
+    return dist > 8 ? { c: pac.c, r: pac.r } : g.scatterTarget;
+  }
+
+  function updateGhost(g) {
+    g.elapsed++;
+
+    // Release from house
+    if (g.inHouse) {
+      // bob and leave when timer hits
+      if (g.elapsed >= g.releaseAt) {
+        // slide to the door gap, then rise out
+        const exitX = 14 * TILE;               // x center of the door gap
+        const exitY = 11 * TILE + TILE / 2;    // corridor above the door
+        if (Math.abs(g.x - exitX) > 1.5) {
+          g.dir = g.x < exitX ? "right" : "left";
+          g.x += Math.sign(exitX - g.x) * 1.3;
+        } else {
+          g.x = exitX;
+          g.dir = "up";
+          g.y -= 1.3;
+          if (g.y <= exitY) {
+            g.c = 14; g.r = 11;
+            snapToCenter(g);
+            g.inHouse = false;
+          }
+        }
+        return;
+      } else {
+        // bob up and down inside
+        g.y += Math.sin(g.elapsed * 0.1) * 0.6;
+        return;
+      }
+    }
+
+    const canUseDoor = g.mode === "eaten";
+
+    let spd = g.speed;
+    if (g.mode === "frightened") spd = g.speed * 0.6;
+    if (g.mode === "eaten") spd = g.speed * 1.8;
+
+    if (atCenter(g, spd)) {
+      snapToCenter(g);
+      g.c = Math.round((g.x - TILE / 2) / TILE);
+      g.r = Math.round((g.y - TILE / 2) / TILE);
+
+      // arrived home while eaten -> revive and exit through the door again
+      if (g.mode === "eaten" && Math.abs(g.c - g.home.c) <= 1 && Math.abs(g.r - g.home.r) <= 1) {
+        g.mode = (currentWaveMode());
+        g.inHouse = true;
+        g.elapsed = g.releaseAt; // leave immediately
+      }
+
+      // choose direction at intersection
+      const target = ghostTarget(g);
+      const options = ["up", "left", "down", "right"].filter((dir) => {
+        if (dir === reverse(g.dir)) return false; // no reversing
+        const t = tileAhead(g, dir);
+        return !isWallForGhost(t.c, t.r, canUseDoor);
+      });
+
+      let choices = options.length ? options : [reverse(g.dir)];
+
+      if (g.mode === "frightened" || target === null) {
+        // random
+        g.dir = choices[Math.floor(Math.random() * choices.length)];
+      } else {
+        // pick option minimizing distance to target
+        let best = null, bestD = Infinity;
+        for (const dir of choices) {
+          const t = tileAhead(g, dir);
+          const dd = (t.c - target.c) ** 2 + (t.r - target.r) ** 2;
+          if (dd < bestD) { bestD = dd; best = dir; }
+        }
+        g.dir = best;
+      }
+    }
+
+    const d = DIRS[g.dir];
+    g.x += d.x * spd;
+    g.y += d.y * spd;
+    wrapTunnel(g);
+    g.c = Math.round((g.x - TILE / 2) / TILE);
+    g.r = Math.round((g.y - TILE / 2) / TILE);
+  }
+
+  function currentWaveMode() {
+    return WAVES[Math.min(waveIndex, WAVES.length - 1)].mode;
+  }
+
+  function updateModes() {
+    // global scatter/chase wave (doesn't affect frightened/eaten)
+    if (frightTimer <= 0) {
+      modeTimer++;
+      const wave = WAVES[Math.min(waveIndex, WAVES.length - 1)];
+      if (modeTimer >= wave.time) {
+        modeTimer = 0;
+        waveIndex = Math.min(waveIndex + 1, WAVES.length - 1);
+      }
+      const m = currentWaveMode();
+      for (const g of ghosts) {
+        if (g.mode === "scatter" || g.mode === "chase") g.mode = m;
+      }
+    }
+
+    if (frightTimer > 0) {
+      frightTimer--;
+      if (frightTimer === 0) {
+        for (const g of ghosts) if (g.mode === "frightened") g.mode = currentWaveMode();
+      }
+    }
+  }
+
+  // ----- Collisions -----
+  function checkCollisions() {
+    for (const g of ghosts) {
+      if (g.inHouse) continue;
+      const dist = Math.hypot(g.x - pac.x, g.y - pac.y);
+      if (dist < TILE * 0.7) {
+        if (g.mode === "frightened") {
+          g.mode = "eaten";
+          ghostEatChain++;
+          const pts = 200 * Math.pow(2, ghostEatChain - 1);
+          score += pts; bumpScore();
+          flashPoints(pts, g.x, g.y);
+          sfx.eatGhost();
+        } else if (g.mode !== "eaten") {
+          loseLife();
+          return;
+        }
+      }
+    }
+  }
+
+  let floatLabels = [];
+  function flashPoints(pts, x, y) {
+    floatLabels.push({ text: "" + pts, x, y, life: 50 });
+  }
+
+  function loseLife() {
+    sfx.death();
+    lives--;
+    document.getElementById("lives").textContent = lives;
+    if (lives <= 0) {
+      gameOver = true;
+      running = false;
+      setMsg("GAME OVER — press an arrow key to play again");
+    } else {
+      resetPositions();
+      setMsg("Caught! Press an arrow key");
+      running = false;
+    }
+  }
+
+  function resetPositions() {
+    pac.c = pacStart.c; pac.r = pacStart.r;
+    snapToCenter(pac);
+    pac.dir = "none"; pac.next = "none";
+    frightTimer = 0;
+    modeTimer = 0; waveIndex = 0;
+    ghosts.forEach((g, i) => {
+      g.c = g.home.c; g.r = g.home.r;
+      snapToCenter(g);
+      g.dir = "up";
+      g.mode = "scatter";
+      g.inHouse = true;
+      g.elapsed = 0;
+      g.releaseAt = i * 180;
+    });
+  }
+
+  function nextLevel() {
+    level++;
+    // refill pellets
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++) {
+        const orig = RAW[r][c];
+        if (orig === ".") grid[r][c] = ".";
+        else if (orig === "o") grid[r][c] = "o";
+      }
+    pelletsLeft = totalPellets;
+    resetPositions();
+    // speed up ghosts a touch
+    ghosts.forEach((g) => g.speed = Math.min(2.6, g.speed + 0.12));
+    running = false;
+    sfx.levelUp();
+    setMsg("Level " + level + "! Press an arrow key");
+  }
+
+  function restart() {
+    score = 0; lives = 3; level = 1; gameOver = false;
+    pelletsLeft = totalPellets;
+    document.getElementById("score").textContent = 0;
+    document.getElementById("lives").textContent = 3;
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++) {
+        const orig = RAW[r][c];
+        grid[r][c] = (orig === "." || orig === "o") ? orig : (orig === "#" || orig === "-") ? orig : " ";
+      }
+    ghosts.forEach((g) => g.speed = 1.9);
+    resetPositions();
+    running = true;
+    sfx.intro();
+    introNeeded = false;
+    setMsg("");
+  }
+
+  // ----- Rendering -----
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // walls + pellets
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const ch = grid[r][c];
+        const x = c * TILE, y = r * TILE;
+        if (ch === "#") {
+          ctx.fillStyle = "#1919cf";
+          // draw rounded-ish wall blocks
+          ctx.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+          ctx.fillStyle = "#3a3aff";
+          ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8);
+        } else if (ch === "-") {
+          ctx.fillStyle = "#ff9cce";
+          ctx.fillRect(x + 1, y + TILE / 2 - 2, TILE - 2, 4);
+        } else if (ch === ".") {
+          ctx.fillStyle = "#ffd9a0";
+          ctx.beginPath();
+          ctx.arc(x + TILE / 2, y + TILE / 2, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (ch === "o") {
+          const pulse = 3.5 + Math.sin(Date.now() / 150) * 1.5;
+          ctx.fillStyle = "#ffd9a0";
+          ctx.beginPath();
+          ctx.arc(x + TILE / 2, y + TILE / 2, pulse, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    // ghosts
+    for (const g of ghosts) drawGhost(g);
+
+    // pacman
+    drawPac();
+
+    // floating point labels
+    floatLabels = floatLabels.filter((f) => f.life > 0);
+    for (const f of floatLabels) {
+      ctx.fillStyle = "#00ffff";
+      ctx.font = "bold 14px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(f.text, f.x, f.y - (50 - f.life) * 0.3);
+      f.life--;
+    }
+    ctx.textAlign = "start";
+
+    // overlay states
+    if (!running && !gameOver) {
+      dimOverlay();
+    } else if (gameOver) {
+      dimOverlay();
+      ctx.fillStyle = "#ff2a2a";
+      ctx.font = "bold 40px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("GAME OVER", W / 2, H / 2);
+      ctx.textAlign = "start";
+    }
+    if (paused) {
+      dimOverlay();
+      ctx.fillStyle = "#ffcc00";
+      ctx.font = "bold 36px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("PAUSED", W / 2, H / 2);
+      ctx.textAlign = "start";
+    }
+  }
+
+  function dimOverlay() {
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawPac() {
+    const open = pac.mouth * Math.PI;
+    let angle = 0;
+    if (pac.dir === "right") angle = 0;
+    else if (pac.dir === "down") angle = Math.PI / 2;
+    else if (pac.dir === "left") angle = Math.PI;
+    else if (pac.dir === "up") angle = -Math.PI / 2;
+
+    ctx.save();
+    ctx.translate(pac.x, pac.y);
+    ctx.rotate(angle);
+    ctx.fillStyle = "#ffe100";
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, TILE / 2 - 1, open, Math.PI * 2 - open);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawGhost(g) {
+    const x = g.x, y = g.y;
+    const radius = TILE / 2 - 1;
+
+    let body;
+    if (g.mode === "eaten") {
+      body = null; // only eyes
+    } else if (g.mode === "frightened") {
+      // flash white near end
+      const flashing = frightTimer < 120 && Math.floor(frightTimer / 15) % 2 === 0;
+      body = flashing ? "#ffffff" : "#2121de";
+    } else {
+      body = g.color;
+    }
+
+    if (body) {
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.arc(x, y - 1, radius, Math.PI, 0);
+      ctx.lineTo(x + radius, y + radius - 2);
+      // wavy bottom
+      const feet = 3;
+      const step = (radius * 2) / feet;
+      for (let i = 0; i < feet; i++) {
+        const fx = x + radius - step * i;
+        const dir = i % 2 === 0 ? -1 : 1;
+        ctx.lineTo(fx - step / 2, y + radius - 2 + (i % 2 === 0 ? -4 : 0));
+        ctx.lineTo(fx - step, y + radius - 2);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // eyes
+    const lookX = DIRS[g.dir].x;
+    const lookY = DIRS[g.dir].y;
+    for (const ex of [-4, 4]) {
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(x + ex, y - 2, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = (g.mode === "frightened") ? "#fff" : "#001";
+      ctx.beginPath();
+      ctx.arc(x + ex + lookX * 1.6, y - 2 + lookY * 1.6, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ----- Main loop -----
+  // Fixed-timestep simulation driven by BOTH requestAnimationFrame and a
+  // setInterval fallback, so the game keeps running even in webviews or
+  // background tabs where rAF is throttled or never fires.
+  const STEP = 1000 / 60;
+  let last = performance.now();
+  let acc = 0;
+
+  function advance(now) {
+    acc = Math.min(acc + (now - last), 250); // cap catch-up after a stall
+    last = now;
+    while (acc >= STEP) {
+      if (running && !paused && !gameOver) {
+        updatePac();
+        updateModes();
+        for (const g of ghosts) updateGhost(g);
+        checkCollisions();
+      }
+      acc -= STEP;
+    }
+    if (running && !paused && !gameOver) {
+      sfx.setSiren(frightTimer > 0 ? "fright" : "normal");
+    } else {
+      sfx.setSiren("off");
+    }
+    draw();
+  }
+
+  function rafLoop(now) {
+    advance(now);
+    requestAnimationFrame(rafLoop);
+  }
+
+  // initial render
+  snapToCenter(pac);
+  requestAnimationFrame(rafLoop);
+  setInterval(() => advance(performance.now()), STEP);
+})();
+</script>
+</body>
+</html>
