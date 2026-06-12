@@ -66,6 +66,75 @@
     font-family: inherit;
   }
   .padbtn:active { background: #2e2e5e; }
+  #row {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  #board {
+    width: 250px;
+    background: #07071a;
+    border: 1px solid #1919cf;
+    border-radius: 6px;
+    padding: 14px;
+    box-shadow: 0 0 18px rgba(33, 33, 255, 0.25);
+  }
+  #lbtitle {
+    color: #ffcc00;
+    font-size: 16px;
+    letter-spacing: 2px;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+  #namerow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #888;
+    letter-spacing: 1px;
+    margin-bottom: 10px;
+  }
+  #player {
+    flex: 1;
+    min-width: 0;
+    background: #000;
+    border: 1px solid #3a3aff;
+    border-radius: 4px;
+    color: #fff;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 5px 7px;
+    text-transform: uppercase;
+  }
+  #player:focus { outline: 1px solid #ffcc00; }
+  #lblist {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 13px;
+  }
+  #lblist li {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    padding: 4px 0;
+    border-bottom: 1px dashed #1c1c3a;
+  }
+  .lbrank { color: #555; width: 18px; }
+  .lbname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lbscore { color: #ffcc00; }
+  .lbdate { color: #666; font-size: 11px; }
+  .lbempty { color: #666; font-size: 12px; justify-content: center; }
+  #lbnote {
+    margin-top: 8px;
+    font-size: 11px;
+    color: #555;
+    text-align: center;
+    letter-spacing: 1px;
+  }
 </style>
 </head>
 <body>
@@ -75,7 +144,17 @@
     <div>HIGH <span id="high">0</span></div>
     <div>LIVES <span id="lives">3</span></div>
   </div>
-  <canvas id="game"></canvas>
+  <div id="row">
+    <canvas id="game"></canvas>
+    <aside id="board">
+      <div id="lbtitle">★ LEADERBOARD ★</div>
+      <label id="namerow">NAME
+        <input id="player" maxlength="12" placeholder="YOUR NAME" autocomplete="off" spellcheck="false">
+      </label>
+      <ol id="lblist"></ol>
+      <div id="lbnote"></div>
+    </aside>
+  </div>
   <div id="msg">Press an arrow key or tap a button to start</div>
   <div id="pad" aria-label="touch controls">
     <button class="padbtn" data-dir="up">▲</button>
@@ -361,6 +440,7 @@
     W: "up", S: "down", A: "left", D: "right",
   };
   window.addEventListener("keydown", (e) => {
+    if (e.target && e.target.tagName === "INPUT") return; // typing a name, not steering
     sfx.ensure();
     if (e.key === "p" || e.key === "P") {
       if (running && !gameOver) { paused = !paused; setMsg(paused ? "Paused" : ""); }
@@ -682,6 +762,7 @@
       gameOver = true;
       running = false;
       setMsg("GAME OVER — press an arrow key to play again");
+      submitScore(score);
     } else {
       resetPositions();
       setMsg("Caught! Press an arrow key");
@@ -885,6 +966,95 @@
       ctx.fill();
     }
   }
+
+  // ----- Leaderboard -----
+  // Global scores via /api/scores (Vercel Blob); falls back to
+  // localStorage when the API is unreachable (e.g. running locally).
+  const SCORES_API = "/api/scores";
+  const nameInput = document.getElementById("player");
+  nameInput.value = localStorage.getItem("pacman_name") || "";
+  nameInput.addEventListener("input", () => {
+    localStorage.setItem("pacman_name", nameInput.value);
+  });
+
+  function playerName() {
+    return nameInput.value.trim().toUpperCase().slice(0, 12) || "ANON";
+  }
+
+  function localBoard() {
+    try { return JSON.parse(localStorage.getItem("pacman_lb") || "[]"); }
+    catch { return []; }
+  }
+
+  function saveLocalScore(entry) {
+    const b = localBoard();
+    b.push(entry);
+    b.sort((x, y) => y.score - x.score || x.ts - y.ts);
+    const top = b.slice(0, 10);
+    localStorage.setItem("pacman_lb", JSON.stringify(top));
+    return top;
+  }
+
+  function renderBoard(entries, isGlobal) {
+    const ol = document.getElementById("lblist");
+    ol.innerHTML = "";
+    if (!entries.length) {
+      const li = document.createElement("li");
+      li.className = "lbempty";
+      li.textContent = "No scores yet — be the first!";
+      ol.appendChild(li);
+    }
+    entries.forEach((e, i) => {
+      const li = document.createElement("li");
+      const when = new Date(e.ts);
+      const rank = document.createElement("span");
+      rank.className = "lbrank";
+      rank.textContent = (i + 1) + ".";
+      const name = document.createElement("span");
+      name.className = "lbname";
+      name.textContent = e.name;
+      const pts = document.createElement("span");
+      pts.className = "lbscore";
+      pts.textContent = e.score;
+      const date = document.createElement("span");
+      date.className = "lbdate";
+      date.textContent = when.toLocaleDateString([], { month: "short", day: "numeric" });
+      li.title = when.toLocaleString();
+      li.append(rank, name, pts, date);
+      ol.appendChild(li);
+    });
+    document.getElementById("lbnote").textContent =
+      isGlobal ? "global top 10" : "offline — scores saved on this device";
+  }
+
+  async function refreshBoard() {
+    try {
+      const r = await fetch(SCORES_API);
+      if (!r.ok) throw new Error("api unavailable");
+      renderBoard(await r.json(), true);
+    } catch {
+      renderBoard(localBoard(), false);
+    }
+  }
+
+  async function submitScore(finalScore) {
+    if (finalScore <= 0) return;
+    const entry = { name: playerName(), score: finalScore, ts: Date.now() };
+    saveLocalScore(entry);
+    try {
+      const r = await fetch(SCORES_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: entry.name, score: entry.score }),
+      });
+      if (!r.ok) throw new Error("submit failed");
+      renderBoard(await r.json(), true);
+    } catch {
+      renderBoard(localBoard(), false);
+    }
+  }
+
+  refreshBoard();
 
   // ----- Main loop -----
   // Fixed-timestep simulation driven by BOTH requestAnimationFrame and a
